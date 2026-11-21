@@ -5,10 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>חוט</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #efe6d6; font-family: system-ui, sans-serif; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #24201c; font-family: system-ui, sans-serif; }
   canvas { display: block; }
-  #start { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: #efe6d6;
-           color: #3a3836; font-size: clamp(18px, 2vw, 30px); font-weight: 300; cursor: pointer; }
+  #start { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: #24201c;
+           color: #d8cbb4; font-size: clamp(18px, 2vw, 30px); font-weight: 300; cursor: pointer; }
   #debug { position: fixed; left: 16px; bottom: 16px; padding: 8px 10px; border-radius: 6px; background: rgba(239,230,214,.9);
            color: #3a3836; font: 12px/1.5 monospace; direction: ltr; white-space: pre; display: none; }
   body.run { cursor: none; }
@@ -25,43 +25,106 @@ const params = new URLSearchParams(location.search);
 const PACE = +(params.get('pace') || 1);     // 0.5 = הציפורים מגיעות פי 2 מהר יותר. שימושי להגשה.
 let OFFSET = +(params.get('offset') || 0);   // הזזה של כל הספים בדציבלים, אם החדר רועש מדי או שקט מדי
 // כמה דציבלים מעל רעש הרקע של החדר נחשבים:
-const T_SMALL = 6;    // רעש קטן: השקט נעצר, שום דבר לא צומח
-const T_MED = 12;     // רעש בינוני: השקט נחתך בחצי, הנדירות עפות
-const T_LOUD = 20;    // רעש חזק: השקט מתאפס, כולן עפות
-const VOICE_GATE = 6; // בזמן שציפור שרה מהרמקולים, הספים עולים כדי שהמיקרופון לא "ישמע" אותה כרעש
+const T_SMALL = 8;    // רעש קטן: השקט נעצר, שום דבר לא צומח
+const T_MED = 15;     // רעש בינוני: השקט נחתך בחצי, הנדירות עפות
+const T_LOUD = 22;    // רעש חזק: השקט מתאפס, כולן עפות
+const SUSTAIN = 0.35; // כמה שניות רעש בינוני או חזק צריך להימשך כדי להבריח. נקישה או שיעול קצר רק עוצרים את הצמיחה.
+// הדוכיפת ורחש הכנפיים נמוכים, בתחום של קולות אנושיים. בזמן שהם נשמעים הספים עולים, כדי שהמיקרופון לא "ישמע" אותם כרעש.
+const VOICE_GATE = 14;
+const LOW_SOUNDS = ['hoopoe'];
 const CAL_SECONDS = 3;
-const PAPER = '#efe6d6', WIRE = '#3a3836', INK = '#2b2826';
+// ================= אור וצל =================
+// על הקיר אין ציפורים, יש רק אור וצל: אור שמש שנכנס מחלון, וצללים של חוט ושל ציפורים.
+// השקט מחזיר את השמש. ברעש האור שטוח ואפור, כמו ביום מעונן, והצללים חלשים ורכים.
+// בשקט האור מזהיב והצללים מתחדדים. אחרי שקט ארוך במיוחד האור הופך לכתום של שקיעה.
+const LIGHT = {
+  grey: [150, 154, 157],   // יום מעונן: אור מפוזר על כל הקיר
+  room: [36, 31, 27],      // הקיר מחוץ לכתם האור, כשיש שמש
+  sun:  [247, 214, 158],   // אור זהוב
+  dusk: [240, 166, 96],    // שקיעה
+};
+const GOLD_AT = 60, DUSK_AT = 120;   // אחרי כמה שניות של שקט האור זהוב לגמרי, ואחרי כמה הוא כתום
+const SILHOUETTE = true;             // false = הציפורים בצבע, כמו בגרסה השטוחה
+const INK = '#2b2826';
+const light = { w: 0, d: 0 };
+const mix = (a, b, t) => a.map((v, i) => v + (b[i] - v) * t);
+const rgb = c => `rgb(${c.map(Math.round).join(',')})`;
+const clamp01 = v => Math.max(0, Math.min(1, v));
+const smooth = t => t * t * (3 - 2 * t);
 
 // ================= קנבס =================
 const canvas = document.getElementById('c'), ctx = canvas.getContext('2d');
+const mk = () => { const c = document.createElement('canvas'); return [c, c.getContext('2d')]; };
+const [wallC, wallX] = mk(), [farC, farX] = mk(), [nearC, nearX] = mk(), [lmC, lmX] = mk(), [patchC, patchX] = mk(), [tintC, tintX] = mk(), [leafC, leafX] = mk();
+// גרעיניות עדינה, כמו בצילום. היא גם מעלימה פסים במעברי האור.
+const grain = (() => { const [c, x] = mk(); c.width = c.height = 256; const d = x.createImageData(256, 256);
+  for (let i = 0; i < d.data.length; i += 4) { const v = Math.random() * 255 | 0; d.data[i] = d.data[i + 1] = d.data[i + 2] = v; d.data[i + 3] = 255; }
+  x.putImageData(d, 0, 0); return c; })();
+let grainPat = null;
+const MASK = .5;   // שכבות הצל בחצי רזולוציה. הטשטוש מסתיר את זה וחוסך עבודה למחשב.
 let W, H, U;
 function resize() {
   const dpr = Math.min(devicePixelRatio || 1, 2);
   W = innerWidth; H = innerHeight;
   canvas.width = W * dpr; canvas.height = H * dpr; canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  for (const c of [wallC, farC, nearC, lmC]) { c.width = Math.ceil(W * MASK); c.height = Math.ceil(H * MASK); }
   U = Math.min(W / 1250, H / 640);   // יחידת גודל של ציפור
+  buildPatch(); buildLeaves();
 }
-resize(); addEventListener('resize', resize);
+// כתם האור של החלון, מטושטש, ברבע רזולוציה
+function buildPatch() {
+  const w = Math.ceil(W / 2), h = Math.ceil(H / 2);
+  patchC.width = tintC.width = w; patchC.height = tintC.height = h;
+  const [tc, tx] = mk(); tc.width = w; tc.height = h;
+  const path = pts => { tx.beginPath(); pts.forEach(([x, y], i) => i ? tx.lineTo(x * w, y * h) : tx.moveTo(x * w, y * h)); tx.closePath(); tx.fill(); };
+  // החלון: מקבילית נטויה, כמו אור שמש נמוך. עמוד חלון אחד חוצה אותה.
+  tx.fillStyle = '#fff'; path([[.06, .05], [.84, .0], [.97, .93], [.17, .99]]);
+  tx.globalCompositeOperation = 'destination-out'; path([[.585, .0], [.607, .0], [.69, .99], [.668, .99]]);
+  patchX.clearRect(0, 0, w, h); patchX.filter = `blur(${Math.round(w * .011)}px)`; patchX.drawImage(tc, 0, 0); patchX.filter = 'none';
+}
+// צל של ענפים ועלים מעץ מחוץ לחלון, בפינה הימנית העליונה
+function buildLeaves() {
+  const w = Math.ceil(W * .3), h = Math.ceil(H * .32);
+  const [tc, tx] = mk(); tc.width = w; tc.height = h;
+  let seed = 7; const r = () => (seed = seed * 16807 % 2147483647) / 2147483647;
+  tx.fillStyle = tx.strokeStyle = '#000'; tx.lineCap = 'round';
+  for (let k = 0; k < 6; k++) {
+    let x = w * (.7 + r() * .35), y = -4, a = Math.PI * (.55 + r() * .35);
+    const len = h * (.45 + r() * .6), pts = [[x, y]], leaves = [];
+    for (let i = 0; i < 14; i++) {
+      a += (r() - .5) * .35; x += Math.cos(a) * len / 14; y += Math.sin(a) * len / 14; pts.push([x, y]);
+      for (let j = 0; j < 3; j++) { const la = a + (r() - .5) * 2.4, ld = 5 + r() * 13; leaves.push([x + Math.cos(la) * ld, y + Math.sin(la) * ld, la, 6 + r() * 6, 2.2 + r() * 2]); }
+    }
+    tx.lineWidth = 1.5 + r() * 2; tx.beginPath(); pts.forEach(([px, py], i) => i ? tx.lineTo(px, py) : tx.moveTo(px, py)); tx.stroke();
+    for (const [lx, ly, la, rx, ry] of leaves) { tx.save(); tx.translate(lx, ly); tx.rotate(la); tx.beginPath(); tx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2); tx.fill(); tx.restore(); }
+  }
+  leafC.width = w; leafC.height = h; leafX.clearRect(0, 0, w, h); leafX.filter = 'blur(3px)'; leafX.drawImage(tc, 0, 0); leafX.filter = 'none';
+}
 
 // ================= חוט =================
-const wire = { base: .52, sag: .05, amp: 0, vel: 0 };
+// החוט גבוה על הקיר, כדי שמי שעומד ליד המסך יטיל צל מתחתיו, והציפורים ישבו מעל הראש שלו.
+const wire = { base: .3, sag: .04, amp: 0, vel: 0 };
 function wireY(x) { const u = x / W * 2 - 1; return H * wire.base + H * wire.sag * (1 - u * u) + wire.amp * Math.sin(Math.PI * x / W); }
 function kickWire(v) { wire.vel += v; }
 function updateWire(dt) { wire.vel += (-70 * wire.amp - 2.5 * wire.vel) * dt; wire.amp += wire.vel * dt; }
+// נקודת המקרן על הקיר. ציפור שמתקרבת למקרן מטילה צל גדול ומטושטש יותר, שמתרחק מהנקודה הזו.
+const lightCenter = () => [W * .5, H * .42];
 
 // ================= צורות =================
-const poly = (pts, c) => { ctx.fillStyle = c; ctx.beginPath(); pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath(); ctx.fill(); };
-const ell = (x, y, rx, ry, rot, c) => { ctx.fillStyle = c; ctx.beginPath(); ctx.ellipse(x, y, rx, ry, rot, 0, Math.PI * 2); ctx.fill(); };
+let G = ctx;   // על איזה קנבס מציירים כרגע
+const col = c => SILHOUETTE ? '#000' : c;
+const poly = (pts, c) => { G.fillStyle = col(c); G.beginPath(); pts.forEach(([x, y], i) => i ? G.lineTo(x, y) : G.moveTo(x, y)); G.closePath(); G.fill(); };
+const ell = (x, y, rx, ry, rot, c) => { G.fillStyle = col(c); G.beginPath(); G.ellipse(x, y, rx, ry, rot, 0, Math.PI * 2); G.fill(); };
 const circ = (x, y, r, c) => ell(x, y, r, r, 0, c);
-const seg = (x1, y1, x2, y2, w, c) => { ctx.strokeStyle = c; ctx.lineWidth = w; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); };
+const seg = (x1, y1, x2, y2, w, c) => { G.strokeStyle = col(c); G.lineWidth = w; G.lineCap = 'round'; G.beginPath(); G.moveTo(x1, y1); G.lineTo(x2, y2); G.stroke(); };
 // מקור שנפתח כשהציפור שרה
 function beak(s, x, y, len, half, c) {
   const o = s.open;
   poly([[x, y - half], [x - len, y - o], [x, y]], c);
   poly([[x, y], [x - len * .9, y + o], [x, y + half]], c);
 }
-// כרבולת הדוכיפת: open בין 0 (סגורה לאחור) ל-1 (פתוחה כמניפה)
+// כרבולת הדוכיפת: open בין 0 (סגורה לאחור) ל-1 (פתוחה כמניפה). בצל היא הסימן המזהה שלה.
 function crest(open) {
   const B = [-22, -45], OPEN = [-125, -105, -85, -65, -45], SHUT = [-14, -10, -6, -2, 2];
   OPEN.forEach((a1, i) => {
@@ -72,9 +135,12 @@ function crest(open) {
     poly([T, [Tb[0] + p[0] * w, Tb[1] + p[1] * w], [Tb[0] - p[0] * w, Tb[1] - p[1] * w]], '#232323');
   });
 }
+const curve = (x0, y0, cx, cy, x1, y1, w, c) => { G.strokeStyle = col(c); G.lineWidth = w; G.lineCap = 'round'; G.beginPath(); G.moveTo(x0, y0); G.quadraticCurveTo(cx, cy, x1, y1); G.stroke(); };
 
 // ================= המינים =================
 // כל ציפור מצוירת כשהיא פונה שמאלה, כפות הרגליים ב-(0,0), y שלילי = למעלה.
+// הצבעים נשמרים לגרסה הצבעונית (SILHOUETTE = false). בצל מזהים את המין לפי קו המתאר:
+// הכרבולת של הדוכיפת, המקור הענק של השלדג, המקור המעוקל של הצופית, הציצית של הבולבול.
 // every: כל כמה שניות היא שרה (מינימום, מקסימום)
 const DEF_LEGS = [[-2, -7, -3, 0], [5, -7, 5, 0]];
 const SPECIES = {
@@ -84,79 +150,82 @@ const SPECIES = {
     wing: () => { poly([[-4, -28], [20, -30], [28, -14], [4, -14]], '#7a5a40'); poly([[4, -26], [10, -27], [16, -16], [10, -16]], '#e3d6c2'); },
     head: s => {
       circ(-16, -34, 11, '#b08866');
-      ctx.fillStyle = '#7d7873'; ctx.beginPath(); ctx.arc(-16, -34, 11, Math.PI * 1.05, Math.PI * 1.95); ctx.closePath(); ctx.fill();
+      G.fillStyle = col('#7d7873'); G.beginPath(); G.arc(-16, -34, 11, Math.PI * 1.05, Math.PI * 1.95); G.closePath(); G.fill();
       poly([[-25, -29], [-14, -26], [-16, -18], [-23, -22]], '#2a2624');
-      beak(s, -26, -34, 9, 3.2, '#3a3330'); circ(-20, -36, 1.8, INK);
+      beak(s, -26, -34, 9, 3.2, '#3a3330'); if (!SILHOUETTE) circ(-20, -36, 1.8, INK);
     } },
   bulbul: { name: 'בולבול', size: 1.05, pivot: [2, -30], every: [5, 10],
     tail: () => poly([[16, -14], [42, 0], [36, 6], [12, -8]], '#6f6458'),
     body: () => { ell(4, -22, 24, 15, .25, '#8e8273'); ell(-2, -15, 15, 9, .2, '#cbc2b4'); ell(15, -11, 7, 4, .3, '#e5c03a'); },
     wing: () => poly([[-4, -30], [22, -31], [30, -15], [4, -15]], '#74695d'),
     head: s => {
-      poly([[-14, -47], [-7, -43], [-16, -41]], '#2b2826'); circ(-16, -36, 12, '#2b2826');
-      beak(s, -27, -36, 9, 3, '#2b2826'); circ(-20, -38, 3.2, '#f2eee6'); circ(-20, -38, 1.6, INK);
+      poly([[-11, -54], [-5, -44], [-19, -42]], '#2b2826'); circ(-16, -36, 12, '#2b2826');
+      beak(s, -27, -36, 9, 3, '#2b2826');
+      if (!SILHOUETTE) { circ(-20, -38, 3.2, '#f2eee6'); circ(-20, -38, 1.6, INK); }
     } },
   sunbird: { name: 'צופית', size: .85, pivot: [0, -24], every: [6, 12],
     tail: () => poly([[14, -12], [34, -2], [30, 4], [10, -7]], '#1e2433'),
     body: () => ell(3, -18, 18, 12, .25, '#232a3d'),
-    wing: () => { poly([[-4, -24], [16, -25], [22, -12], [2, -12]], '#2e3a52'); ell(-1, -23, 3.5, 2.2, 0, '#e08a2e'); },
+    wing: () => { poly([[-4, -24], [16, -25], [22, -12], [2, -12]], '#2e3a52'); if (!SILHOUETTE) ell(-1, -23, 3.5, 2.2, 0, '#e08a2e'); },
     head: s => {
       circ(-13, -28, 9, '#1f4a7a');
-      ctx.strokeStyle = '#14161c'; ctx.lineWidth = 2.2; ctx.lineCap = 'round';
-      ctx.beginPath(); ctx.moveTo(-21, -29 + s.open * .5); ctx.quadraticCurveTo(-31, -30, -37, -20); ctx.stroke();
-      circ(-16, -30, 1.6, '#0d0f14');
+      curve(-21, -29 + s.open * .5, -31, -30, -37, -20, 2.2, '#14161c');
+      if (!SILHOUETTE) circ(-16, -30, 1.6, '#0d0f14');
     } },
   hoopoe: { name: 'דוכיפת', size: 1.1, pivot: [-2, -29], every: [4, 8], legs: [[-3.5, -9, -4.5, 0], [5, -7.5, 5, 0]],
-    tail: () => { poly([[20, -19], [50, 9], [42, 15.5], [13, -13]], '#232323'); poly([[31, -8], [35.5, -4], [29.5, 2], [25, -2]], '#f7f2e8'); },
+    tail: () => { poly([[20, -19], [50, 9], [42, 15.5], [13, -13]], '#232323'); if (!SILHOUETTE) poly([[31, -8], [35.5, -4], [29.5, 2], [25, -2]], '#f7f2e8'); },
     body: () => ell(0, -22, 26, 15, .35, '#d99a6c'),
     wing: () => {
       poly([[-13.5, -30], [21.5, -33], [33, -15], [0, -13]], '#232323');
-      poly([[-3.5, -29.5], [0, -29.5], [10, -13.5], [6.5, -13.5]], '#f7f2e8');
-      poly([[6.5, -31], [10, -31], [20, -14], [16.5, -14]], '#f7f2e8');
-      poly([[16.5, -32], [20, -32], [29, -15], [25.5, -14.5]], '#f7f2e8');
+      if (!SILHOUETTE) {
+        poly([[-3.5, -29.5], [0, -29.5], [10, -13.5], [6.5, -13.5]], '#f7f2e8');
+        poly([[6.5, -31], [10, -31], [20, -14], [16.5, -14]], '#f7f2e8');
+        poly([[16.5, -32], [20, -32], [29, -15], [25.5, -14.5]], '#f7f2e8');
+      }
     },
     head: s => {
       crest(s.crest); circ(-25, -37, 10.5, '#d99a6c');
-      ctx.strokeStyle = '#232323'; ctx.lineWidth = 2; ctx.lineCap = 'round';
-      ctx.beginPath(); ctx.moveTo(-34, -34.5); ctx.quadraticCurveTo(-48, -30, -58, -19); ctx.stroke();
-      circ(-28.5, -39, 1.5, '#232323');
+      curve(-34, -34.5, -48, -30, -58, -19, 2, '#232323');
+      if (!SILHOUETTE) circ(-28.5, -39, 1.5, '#232323');
     } },
   kingfisher: { name: 'שלדג', size: 1.1, pivot: [2, -31], every: [8, 14],
     tail: () => poly([[16, -16], [38, -2], [32, 3], [12, -10]], '#2a8fb0'),
     body: () => ell(2, -22, 22, 15, .3, '#8a4a2a'),
     wing: () => { poly([[-6, -32], [20, -33], [28, -14], [2, -14]], '#2fa3c4'); poly([[12, -26], [28, -14], [18, -13]], '#1d3e5c'); },
     head: s => {
-      circ(-15, -36, 12, '#7a3f22'); poly([[-23, -30], [-10, -28], [-9, -19], [-19, -21]], '#f4efe6');
-      beak(s, -24, -36, 26, 4.5, '#c9372c'); circ(-17, -39, 2, INK);
+      circ(-15, -36, 12, '#7a3f22'); if (!SILHOUETTE) poly([[-23, -30], [-10, -28], [-9, -19], [-19, -21]], '#f4efe6');
+      beak(s, -24, -36, 26, 4.5, '#c9372c'); if (!SILHOUETTE) circ(-17, -39, 2, INK);
     } },
 };
 
-function drawBird(b) {
-  const sp = SPECIES[b.sp];
-  ctx.save();
-  ctx.translate(b.x, b.y); ctx.scale(U * sp.size * b.face, U * sp.size); ctx.rotate(b.tilt);
+// k: הגדלה של הצל. ציפור שקרובה למקרן מטילה צל גדול.
+function drawBird(g, b, x, y, k) {
+  const sp = SPECIES[b.sp]; G = g;
+  G.save();
+  G.translate(x, y); G.scale(U * sp.size * b.face * k, U * sp.size * k); G.rotate(b.tilt);
   if (b.state === 'perched' || (b.state === 'fleeing' && b.delay > 0)) (sp.legs || DEF_LEGS).forEach(l => seg(l[0], l[1], l[2], l[3], 1.6, INK));
   sp.tail(); sp.body();
-  ctx.save(); ctx.translate(sp.pivot[0], sp.pivot[1]); ctx.rotate(b.flap); ctx.translate(-sp.pivot[0], -sp.pivot[1]); sp.wing(); ctx.restore();
-  ctx.save(); ctx.translate(0, -b.sing * 1.5); sp.head({ open: b.sing * 2.2, crest: b.crest }); ctx.restore();
-  ctx.restore();
+  G.save(); G.translate(sp.pivot[0], sp.pivot[1]); G.rotate(b.flap); G.translate(-sp.pivot[0], -sp.pivot[1]); sp.wing(); G.restore();
+  G.save(); G.translate(0, -b.sing * 1.5); sp.head({ open: b.sing * 2.2, crest: b.crest }); G.restore();
+  G.restore();
 }
 
 // ================= הלהקה =================
 // מין, אחרי כמה שניות של שקט רצוף הוא מגיע, ומקום על החוט. הנפוצות מגיעות קודם, הביישניות אחרונות.
-const SLOTS = Array.from({ length: 12 }, (_, i) => .1 + i * .8 / 11);
+const SLOTS = Array.from({ length: 12 }, (_, i) => .12 + i * .76 / 11);
 const ROSTER = [
   ['sparrow', 4, 5], ['sparrow', 8, 7], ['sparrow', 12, 4], ['bulbul', 18, 8], ['bulbul', 26, 3], ['sparrow', 34, 9],
   ['sunbird', 42, 1], ['sunbird', 52, 10], ['bulbul', 62, 6], ['hoopoe', 80, 2], ['sunbird', 95, 11], ['kingfisher', 120, 0],
 ];
-const birds = ROSTER.map(([sp, arrive, slot]) => ({ sp, arrive, slot: SLOTS[slot], state: 'gone', x: -999, y: -999, face: 1, tilt: 0, flap: 0,
+const birds = ROSTER.map(([sp, arrive, slot]) => ({ sp, arrive, slot: SLOTS[slot], state: 'gone', x: -999, y: -999, z: 0, face: 1, tilt: 0, flap: 0,
   sing: 0, crest: 0, crestPulse: 0, songEnd: 0, nextSing: 0, nextTurn: 0, delay: 0, ph: Math.random() * 9 }));
 
+// z: המרחק מהקיר. 0 = על החוט, 1 = צמוד למקרן. ציפורים מגיעות מכיוון האור ובורחות אליו,
+// כך שהצל שלהן מתחיל ענק ומטושטש ומתכווץ לחוט, ובבריחה מתנפח ומתפזר על כל הקיר.
 function startArrive(b) {
-  const tx = b.slot * W, ty = wireY(tx), side = Math.random() < .5 ? -1 : 1;
-  b.fx = tx + side * W * (.35 + Math.random() * .3); b.fy = -.12 * H;
-  b.cx = tx + (b.fx - tx) * .35; b.cy = ty - .28 * H;
-  b.p = 0; b.dur = 1.6 + Math.random() * .6; b.face = b.fx > tx ? 1 : -1; b.state = 'arriving';
+  const tx = b.slot * W, side = Math.random() < .5 ? -1 : 1;
+  b.fx = tx + side * W * (.1 + Math.random() * .15); b.fy = wireY(tx) - H * (.1 + Math.random() * .1);
+  b.p = 0; b.dur = 1.6 + Math.random() * .7; b.face = b.fx > tx ? 1 : -1; b.state = 'arriving';
 }
 function startFlee(b, delay) {
   b.onWire = b.state === 'perched'; b.state = 'fleeing'; b.delay = b.onWire ? delay : 0; b.launched = false;
@@ -164,14 +233,14 @@ function startFlee(b, delay) {
 function updateBird(b, dt, now) {
   const sp = SPECIES[b.sp];
   if (b.state === 'arriving') {
-    b.p += dt / b.dur; const p = Math.min(1, b.p), e = 1 - (1 - p) * (1 - p);
+    b.p += dt / b.dur; const p = Math.min(1, b.p), e = 1 - (1 - p) ** 3;
     const tx = b.slot * W, ty = wireY(tx) - 1;
-    b.x = (1 - e) ** 2 * b.fx + 2 * (1 - e) * e * b.cx + e * e * tx;
-    b.y = (1 - e) ** 2 * b.fy + 2 * (1 - e) * e * b.cy + e * e * ty;
-    b.flap = p < .75 ? Math.sin(now * 26 + b.ph) * .8 - .3 : -1 + (p - .75) * 2;
-    b.tilt = p < .75 ? -.15 : 0;
+    b.x = b.fx + (tx - b.fx) * e; b.y = b.fy + (ty - b.fy) * e - Math.sin(Math.PI * e) * H * .03;
+    b.z = .85 * (1 - e);
+    b.flap = p < .8 ? Math.sin(now * 24 + b.ph) * .8 - .3 : -1 + (p - .8) * 3;
+    b.tilt = p < .8 ? -.12 : 0;
     if (p >= 1) {
-      b.state = 'perched'; b.flap = 0; b.tilt = 0; kickWire(22 * U * sp.size);
+      b.state = 'perched'; b.flap = 0; b.tilt = 0; b.z = 0; kickWire(22 * U * sp.size);
       b.nextSing = 1 + Math.random() * 2.5; b.crestPulse = 1.2; b.nextTurn = 5 + Math.random() * 10;
     }
   } else if (b.state === 'perched') {
@@ -187,14 +256,14 @@ function updateBird(b, dt, now) {
   } else if (b.state === 'fleeing') {
     if (b.delay > 0) { b.delay -= dt; b.x = b.slot * W; b.y = wireY(b.x) - 1; return; }
     if (!b.launched) {
-      b.launched = true; flutter(b.x); hush(b); b.sing = 0;
+      b.launched = true; flutter(b.x); hush(b); b.sing = 0; b.z = Math.max(b.z, 0);
       if (b.onWire) kickWire(-16 * U * sp.size);
-      const dir = b.x < W / 2 ? -1 : 1;
-      b.vx = dir * (160 + Math.random() * 160) * U; b.vy = -(220 + Math.random() * 160) * U; b.face = b.vx < 0 ? 1 : -1;
+      const dir = Math.random() < .5 ? -1 : 1;
+      b.vx = dir * (60 + Math.random() * 110) * U; b.vy = -(50 + Math.random() * 90) * U; b.face = b.vx < 0 ? 1 : -1;
     }
-    b.vy -= 120 * U * dt; b.vx *= 1 + dt * .6; b.x += b.vx * dt; b.y += b.vy * dt;
-    b.flap = Math.sin(now * 34 + b.ph) * .9 - .35; b.tilt = -.25;
-    if (b.y < -80 * U || b.x < -120 * U || b.x > W + 120 * U) b.state = 'gone';
+    b.x += b.vx * dt; b.y += b.vy * dt; b.z += dt * (.5 + 1.3 * b.z);
+    b.flap = Math.sin(now * 30 + b.ph) * .9 - .35; b.tilt = -.25;
+    if (b.z > .93) b.state = 'gone';
   }
   const crestTarget = (b.state === 'perched' && (b.sing > .1 || b.crestPulse > 0)) ? 1 : 0;
   b.crest += (crestTarget - b.crest) * Math.min(1, dt * 8);
@@ -232,12 +301,14 @@ function play(b, now) {
   const list = audio.files[b.sp], buf = list && list[Math.random() * list.length | 0];
   if (buf) { const s = ac.createBufferSource(); s.buffer = buf; s.connect(g); s.start(); dur = buf.duration; }
   else dur = SONGS[b.sp](ac.currentTime + .02, g);
-  b.gain = g; b.songEnd = now + dur + .05; audio.voicesUntil = Math.max(audio.voicesUntil, b.songEnd + .3);
+  b.gain = g; b.songEnd = now + dur + .05;
+  if (LOW_SOUNDS.includes(b.sp)) audio.voicesUntil = Math.max(audio.voicesUntil, b.songEnd + .3);
 }
 function hush(b) { if (b.gain) { b.gain.gain.setTargetAtTime(0, audio.ac.currentTime, .03); b.gain = null; } b.songEnd = 0; }
 // רחש כנפיים בהמראה
 function flutter(x) {
   if (!audio.ac) return;
+  audio.voicesUntil = Math.max(audio.voicesUntil, clockNow() + 1.2);   // שהמיקרופון לא ישמע את הכנפיים כרעש
   const wings = audio.files.wings;
   if (wings) {   // הקלטה אמיתית
     const ac = audio.ac, s = ac.createBufferSource(), g = ac.createGain(), pan = ac.createStereoPanner();
@@ -257,7 +328,7 @@ function flutter(x) {
 // ================= מיקרופון =================
 // echoCancellation נשאר דלוק: הוא מנסה להוריד מהמיקרופון את מה שהעמוד עצמו משמיע, כלומר את הציפורים.
 // noiseSuppression ו-autoGainControl כבויים, אחרת הדפדפן "ממלא" את השקט ומשטיח את הרעש.
-const mic = { ok: false, analyser: null, buf: null, db: -100, lvl: -100, floor: null, cal: [], calUntil: 0, error: '' };
+const mic = { ok: false, analyser: null, buf: null, db: -100, lvl: -100, floor: null, cal: [], calUntil: 0, error: '', hist: [], histT: 0, quiet: null };
 async function startAudio() {
   const ac = audio.ac = new (window.AudioContext || window.webkitAudioContext)();
   audio.master = ac.createGain(); audio.master.gain.value = .9; audio.master.connect(ac.destination);
@@ -271,7 +342,13 @@ async function startAudio() {
   }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: false } });
-    mic.analyser = ac.createAnalyser(); mic.analyser.fftSize = 2048; ac.createMediaStreamSource(stream).connect(mic.analyser);
+    // המיקרופון מקשיב רק לתחום של קולות אנושיים (דיבור, צעדים, כיסאות), מתחת ל-1500 הרץ.
+    // הקלטות הציפורים מסוננות מעל 1800 הרץ, כך שהמערכת כמעט לא שומעת את הציפורים של עצמה.
+    mic.analyser = ac.createAnalyser(); mic.analyser.fftSize = 2048;
+    const hp = ac.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 90;
+    const lp1 = ac.createBiquadFilter(); lp1.type = 'lowpass'; lp1.frequency.value = 1500;
+    const lp2 = ac.createBiquadFilter(); lp2.type = 'lowpass'; lp2.frequency.value = 1500;
+    ac.createMediaStreamSource(stream).connect(hp).connect(lp1).connect(lp2).connect(mic.analyser);
     mic.buf = new Float32Array(mic.analyser.fftSize); mic.ok = true; calibrate();
   } catch (e) { mic.error = e.name || String(e); }
 }
@@ -281,14 +358,26 @@ function measure(dt, now) {
   mic.analyser.getFloatTimeDomainData(mic.buf);
   let s = 0; for (let i = 0; i < mic.buf.length; i++) s += mic.buf[i] * mic.buf[i];
   mic.db = 10 * Math.log10(s / mic.buf.length + 1e-12);
-  mic.lvl = mic.db > mic.lvl ? mic.db : mic.lvl + (mic.db - mic.lvl) * Math.min(1, dt * 3);   // עלייה מיידית, ירידה איטית
+  // החלקה: עלייה תוך כעשירית שנייה, ירידה תוך כחצי שנייה
+  mic.lvl += (mic.db - mic.lvl) * Math.min(1, dt / (mic.db > mic.lvl ? .12 : .4));
   if (now < mic.calUntil) { mic.cal.push(mic.db); return; }
   if (mic.cal.length) { mic.cal.sort((a, b) => a - b); mic.floor = mic.cal[mic.cal.length >> 1]; mic.cal = []; }
-  if (mic.floor != null && mic.lvl < mic.floor) mic.floor += (mic.lvl - mic.floor) * dt * .5;   // החדר נעשה שקט יותר: הרצפה יורדת איתו
+  // רעש הרקע של החדר משתנה: מזגן נדלק, מקרן מתחמם. רעש קבוע כזה צריך להפוך ל"שקט" החדש,
+  // אבל דיבור לא. ההבדל: בדיבור יש הפסקות בין מילים, ובמזגן אין.
+  // לכן הרצפה נמדדת לפי הרגעים השקטים ביותר ב-10 השניות האחרונות (האחוזון ה-10).
+  mic.hist.push(mic.db); if (mic.hist.length > 600) mic.hist.shift();
+  if ((mic.histT -= dt) <= 0 && mic.hist.length > 60) {
+    mic.histT = .25;
+    const s = [...mic.hist].sort((a, b) => a - b); mic.quiet = s[Math.floor(s.length * .1)];
+  }
+  if (mic.floor != null && mic.quiet != null) {
+    const diff = mic.quiet - mic.floor;
+    mic.floor += diff * Math.min(1, dt / (diff < 0 ? 1.5 : 5));
+  }
 }
 
 // ================= שקט =================
-let silence = 0, medCool = 0;
+let silence = 0, medCool = 0, medFor = 0, loudFor = 0;
 const sim = { small: false, med: false, loud: false };   // רעש מדומה מהמקלדת, לבדיקה בלי מיקרופון
 function excessDb() {
   let e = (mic.ok && mic.floor != null) ? mic.lvl - mic.floor : 0;
@@ -299,10 +388,12 @@ function updateSilence(dt, now) {
   if (mic.ok && mic.floor == null) return;   // עדיין מכיילים
   const o = OFFSET + (now < audio.voicesUntil ? VOICE_GATE : 0), e = excessDb();
   medCool -= dt;
-  if (e < T_SMALL + o) silence += dt;
-  else if (e < T_MED + o) { /* השקט נעצר */ }
-  else if (e < T_LOUD + o) { if (medCool <= 0) { silence *= .5; medCool = 1.5; } }
-  else silence = 0;
+  loudFor = e >= T_LOUD + o ? loudFor + dt : 0;
+  medFor = e >= T_MED + o ? medFor + dt : 0;
+  if (loudFor > SUSTAIN) silence = 0;
+  else if (medFor > SUSTAIN) { if (medCool <= 0) { silence *= .5; medCool = 2; } }
+  else if (e < T_SMALL + o) silence += dt;
+  // אחרת: רעש קטן או קצר. השקט נעצר, אבל אף אחת לא עפה.
   for (const b of birds) {
     const want = silence >= b.arrive * PACE;
     if (want && b.state === 'gone') startArrive(b);
@@ -311,19 +402,62 @@ function updateSilence(dt, now) {
 }
 
 // ================= ציור =================
-function draw() {
-  ctx.fillStyle = PAPER; ctx.fillRect(0, 0, W, H);
-  ctx.strokeStyle = WIRE; ctx.lineWidth = Math.max(1.5, 1.6 * U); ctx.beginPath();
-  for (let x = -10; x <= W + 10; x += 8) x === -10 ? ctx.moveTo(x, wireY(x)) : ctx.lineTo(x, wireY(x));
-  ctx.stroke();
-  for (const b of birds) if (b.state !== 'gone') drawBird(b);
+function clearMask(x) { x.setTransform(1, 0, 0, 1, 0, 0); x.clearRect(0, 0, x.canvas.width, x.canvas.height); x.setTransform(MASK, 0, 0, MASK, 0, 0); x.globalAlpha = 1; }
+function draw(dt, now) {
+  // השמש חוזרת לאט עם השקט, ונעלמת מהר עם רעש
+  // השמש מתחילה לפרוץ כבר בשניות הראשונות, ולא רק אחרי דקה
+  const gold = clamp01(silence / (GOLD_AT * PACE)) ** .6, dusk = clamp01((silence - GOLD_AT * PACE) / ((DUSK_AT - GOLD_AT) * PACE));
+  light.w += (gold - light.w) * Math.min(1, dt * (gold < light.w ? .6 : .35));   // הבריחה קורית עוד באור הזהוב, ורק אז השמש נעלמת
+  light.d += (dusk - light.d) * Math.min(1, dt * (dusk < light.d ? 1.2 : .3));
+  const w = smooth(clamp01(light.w)), sunC = mix(LIGHT.sun, LIGHT.dusk, light.d);
+
+  // הקיר, וכתם האור של החלון
+  ctx.fillStyle = rgb(mix(LIGHT.grey, LIGHT.room, w)); ctx.fillRect(0, 0, W, H);
+  tintX.globalCompositeOperation = 'source-over'; tintX.clearRect(0, 0, tintC.width, tintC.height); tintX.drawImage(patchC, 0, 0);
+  tintX.globalCompositeOperation = 'source-in'; tintX.fillStyle = rgb(mix(LIGHT.grey, sunC, w)); tintX.fillRect(0, 0, tintC.width, tintC.height);
+  if (w > .01) { ctx.globalAlpha = w; ctx.drawImage(tintC, 0, 0, W, H); }
+
+
+  // צללים: החוט והציפורים שעל החוט, ציפורים באוויר, ציפורים קרובות למקרן
+  [wallX, farX, nearX].forEach(clearMask);
+  wallX.strokeStyle = '#000'; wallX.lineWidth = Math.max(1.5, 1.7 * U); wallX.beginPath();
+  for (let x = -10; x <= W + 10; x += 8) x === -10 ? wallX.moveTo(x, wireY(x)) : wallX.lineTo(x, wireY(x));
+  wallX.stroke();
+  // צל העלים זז ברוח, ונראה רק כשיש שמש
+  wallX.save(); wallX.globalAlpha = .45 * w;
+  wallX.translate(Math.sin(now * .55) * 7 * U + Math.sin(now * 1.7) * 2 * U, Math.sin(now * .4) * 4 * U);
+  wallX.drawImage(leafC, W * .42, -H * .03, W * .6, H * .64); wallX.restore();
+  const [cx, cy] = lightCenter(), used = new Set();
+  for (const b of birds) {
+    if (b.state === 'gone') continue;
+    const z = b.state === 'perched' || (b.state === 'fleeing' && b.delay > 0) ? 0 : b.z, k = 1 / (1 - .75 * z);
+    const g = z < .02 ? wallX : z < .45 ? farX : nearX; used.add(g);
+    g.globalAlpha = clamp01(1 - Math.max(0, z - .7) * 4);
+    drawBird(g, b, cx + (b.x - cx) * k, cy + (b.y - cy) * k, k);
+  }
+  // צל קיים רק איפה שיש אור: בשמש רק בתוך כתם החלון, ביום מעונן על כל הקיר
+  lmX.setTransform(1, 0, 0, 1, 0, 0); lmX.clearRect(0, 0, lmC.width, lmC.height);
+  lmX.globalAlpha = 1; lmX.fillStyle = `rgba(255,255,255,${1 - w})`; lmX.fillRect(0, 0, lmC.width, lmC.height);
+  lmX.globalAlpha = w; lmX.drawImage(patchC, 0, 0, lmC.width, lmC.height); lmX.globalAlpha = 1;
+  for (const x of [wallX, ...used]) { x.save(); x.setTransform(1, 0, 0, 1, 0, 0); x.globalAlpha = 1; x.globalCompositeOperation = 'destination-in'; x.drawImage(lmC, 0, 0); x.restore(); }
+  // צל חזק וחד בשמש, חלש ורך ביום מעונן
+  const shA = .4 + .4 * w, blur = 1.2 + 3.5 * (1 - w);   // ביום מעונן הצל רך יותר, אבל עדיין קריא
+  ctx.globalAlpha = shA; ctx.filter = `blur(${blur}px)`; ctx.drawImage(wallC, 0, 0, W, H);
+  if (used.has(farX)) { ctx.globalAlpha = shA * .85; ctx.filter = `blur(${blur + 4}px)`; ctx.drawImage(farC, 0, 0, W, H); }
+  if (used.has(nearX)) { ctx.globalAlpha = shA * .7; ctx.filter = `blur(${blur + 11}px)`; ctx.drawImage(nearC, 0, 0, W, H); }
+  ctx.filter = 'none';
+  grainPat ||= ctx.createPattern(grain, 'repeat');
+  ctx.save(); ctx.globalAlpha = .045; ctx.globalCompositeOperation = 'overlay';
+  ctx.translate(Math.random() * 256 | 0, Math.random() * 256 | 0); ctx.fillStyle = grainPat; ctx.fillRect(-256, -256, W + 512, H + 512);
+  ctx.restore(); ctx.globalAlpha = 1;
 }
 function updateDebug() {
   const d = document.getElementById('debug'); if (d.style.display !== 'block') return;
   const present = birds.filter(b => b.state === 'perched').map(b => SPECIES[b.sp].name).join(' ');
   d.textContent = [
     mic.ok ? `mic  level ${mic.lvl.toFixed(1)} dB   floor ${mic.floor == null ? 'calibrating…' : mic.floor.toFixed(1)}   excess ${excessDb().toFixed(1)}` : `no mic (${mic.error || 'not started'}) — N / M / Space = noise`,
-    `thresholds +${T_SMALL + OFFSET} / +${T_MED + OFFSET} / +${T_LOUD + OFFSET} dB   offset ${OFFSET}   pace ${PACE}`,
+    `thresholds +${T_SMALL + OFFSET} / +${T_MED + OFFSET} / +${T_LOUD + OFFSET} dB   offset ${OFFSET}   pace ${PACE}` +
+      (clockNow() < audio.voicesUntil ? `   [birds sounding: +${VOICE_GATE}]` : ''),
     `silence ${silence.toFixed(1)} s   birds: ${present}`,
     `keys: D debug · C calibrate · [ ] offset · F fullscreen · N/M/Space noise`,
   ].join('\n');
@@ -335,7 +469,7 @@ function frame() {
   const now = clockNow(), dt = Math.min(.05, now - last); last = now;
   measure(dt, now); updateSilence(dt, now);
   birds.forEach(b => updateBird(b, dt, now));
-  updateWire(dt); draw(); updateDebug();
+  updateWire(dt); draw(dt, now); updateDebug();
   requestAnimationFrame(frame);
 }
 
@@ -358,6 +492,7 @@ addEventListener('keyup', e => {
   const k = e.key.toLowerCase();
   if (k === 'n') sim.small = false; if (k === 'm') sim.med = false; if (e.code === 'Space') sim.loud = false;
 });
+resize(); addEventListener('resize', resize);
 frame();
 </script>
 </body>
